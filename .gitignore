@@ -1,0 +1,10 @@
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+
+# Base de données et secrets
+instance/
+*.db
+*.db-journal
