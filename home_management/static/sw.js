@@ -1,10 +1,10 @@
 // Service worker : met en cache l'interface pour un démarrage instantané.
 // Les données (/api) passent toujours par le réseau pour rester synchronisées.
-const CACHE = 'hm-v1.1.0';
+const CACHE = 'hm-v1.2.0';
 const SHELL = [
   '/',
-  '/static/app.css?v=1.1.0',
-  '/static/app.js?v=1.1.0',
+  '/static/app.css?v=1.2.0',
+  '/static/app.js?v=1.2.0',
   '/static/icons/icon.svg',
   '/static/icons/icon-192.png',
   '/manifest.webmanifest',

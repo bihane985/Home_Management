@@ -4,7 +4,7 @@ import unicodedata
 
 from flask import Blueprint, abort, jsonify, request
 
-from .db import actor, fetch_one, get_db, log, now_iso, payload, rows, text
+from .db import actor, fetch_one, get_db, hid, log, now_iso, payload, rows, text
 
 bp = Blueprint("shopping", __name__, url_prefix="/api")
 
@@ -53,7 +53,8 @@ def normalize(value):
 
 
 def guess_category(name):
-    known = get_db().execute("SELECT category FROM item_catalog WHERE name = ?", (name,)).fetchone()
+    known = get_db().execute("SELECT category FROM item_catalog WHERE household_id = ? AND name = ?",
+                             (hid(), name)).fetchone()
     if known:
         return known["category"]
     # Mots du nom, au singulier approximatif ; le premier mot reconnu l'emporte (« jus d'orange » -> Boissons).
@@ -77,14 +78,24 @@ def category_of(data, name):
 
 def remember(name, category):
     get_db().execute(
-        "INSERT INTO item_catalog (name, category, uses, last_used) VALUES (?, ?, 1, ?) "
-        "ON CONFLICT(name) DO UPDATE SET category = excluded.category, uses = uses + 1, last_used = excluded.last_used",
-        (name, category, now_iso()),
+        "INSERT INTO item_catalog (household_id, name, category, uses, last_used) VALUES (?, ?, ?, 1, ?) "
+        "ON CONFLICT(household_id, name) DO UPDATE SET category = excluded.category, uses = uses + 1, "
+        "last_used = excluded.last_used",
+        (hid(), name, category, now_iso()),
     )
 
 
 def list_row(list_id):
-    return fetch_one("SELECT * FROM shopping_lists WHERE id = ?", (list_id,))
+    return fetch_one("SELECT * FROM shopping_lists WHERE id = ? AND household_id = ?", (list_id, hid()))
+
+
+def item_row(item_id):
+    """Article, à condition qu'il soit sur une liste du foyer."""
+    return fetch_one(
+        "SELECT i.* FROM shopping_items i JOIN shopping_lists l ON l.id = i.list_id "
+        "WHERE i.id = ? AND l.household_id = ?",
+        (item_id, hid()),
+    )
 
 
 # --- Listes --------------------------------------------------------------
@@ -96,7 +107,8 @@ def get_lists():
             "SELECT l.id, l.name, l.icon, l.position, "
             "COALESCE(SUM(i.checked = 0), 0) AS remaining, COUNT(i.id) AS total "
             "FROM shopping_lists l LEFT JOIN shopping_items i ON i.list_id = l.id "
-            "GROUP BY l.id ORDER BY l.position, l.id"
+            "WHERE l.household_id = ? GROUP BY l.id ORDER BY l.position, l.id",
+            (hid(),),
         ),
         categories=CATEGORIES,
     )
@@ -107,10 +119,11 @@ def create_list():
     data = payload()
     name, icon = text(data, "name", 60, required=True), text(data, "icon", 8) or "🛒"
     conn = get_db()
-    position = conn.execute("SELECT COALESCE(MAX(position), -1) + 1 FROM shopping_lists").fetchone()[0]
+    position = conn.execute("SELECT COALESCE(MAX(position), -1) + 1 FROM shopping_lists WHERE household_id = ?",
+                            (hid(),)).fetchone()[0]
     cur = conn.execute(
-        "INSERT INTO shopping_lists (name, icon, position, created_at) VALUES (?, ?, ?, ?)",
-        (name, icon, position, now_iso()),
+        "INSERT INTO shopping_lists (household_id, name, icon, position, created_at) VALUES (?, ?, ?, ?, ?)",
+        (hid(), name, icon, position, now_iso()),
     )
     log("shopping", "create", f"Liste créée : {name}", cur.lastrowid)
     conn.commit()
@@ -134,7 +147,7 @@ def update_list(list_id):
 def delete_list(list_id):
     shopping_list = list_row(list_id)
     conn = get_db()
-    if conn.execute("SELECT COUNT(*) FROM shopping_lists").fetchone()[0] <= 1:
+    if conn.execute("SELECT COUNT(*) FROM shopping_lists WHERE household_id = ?", (hid(),)).fetchone()[0] <= 1:
         abort(409, "Il faut garder au moins une liste.")
     items = rows("SELECT name, quantity, checked FROM shopping_items WHERE list_id = ?", (list_id,))
     conn.execute("DELETE FROM shopping_lists WHERE id = ?", (list_id,))
@@ -203,7 +216,7 @@ def add_items():
 
 @bp.put("/items/<int:item_id>")
 def update_item(item_id):
-    item = fetch_one("SELECT * FROM shopping_items WHERE id = ?", (item_id,))
+    item = item_row(item_id)
     data = payload()
     conn = get_db()
     now = now_iso()
@@ -232,12 +245,12 @@ def update_item(item_id):
             summary += f" (déplacé vers {target['name']})"
         log("shopping", "update", summary, item_id, {"before": item})
     conn.commit()
-    return jsonify(fetch_one("SELECT * FROM shopping_items WHERE id = ?", (item_id,)))
+    return jsonify(item_row(item_id))
 
 
 @bp.delete("/items/<int:item_id>")
 def delete_item(item_id):
-    item = fetch_one("SELECT * FROM shopping_items WHERE id = ?", (item_id,))
+    item = item_row(item_id)
     conn = get_db()
     conn.execute("DELETE FROM shopping_items WHERE id = ?", (item_id,))
     log("shopping", "delete", f"Article retiré : {item['name']}", item_id, item)
@@ -266,10 +279,11 @@ def catalog():
     limit = min(request.args.get("limit", 10, type=int), 30)
     if query:
         items = rows(
-            "SELECT name, category, uses FROM item_catalog WHERE name LIKE ? ORDER BY uses DESC, name LIMIT ?",
-            (f"%{query}%", limit),
+            "SELECT name, category, uses FROM item_catalog WHERE household_id = ? AND name LIKE ? "
+            "ORDER BY uses DESC, name LIMIT ?",
+            (hid(), f"%{query}%", limit),
         )
     else:
-        items = rows("SELECT name, category, uses FROM item_catalog ORDER BY uses DESC, last_used DESC LIMIT ?",
-                     (limit,))
+        items = rows("SELECT name, category, uses FROM item_catalog WHERE household_id = ? "
+                     "ORDER BY uses DESC, last_used DESC LIMIT ?", (hid(), limit))
     return jsonify(items)

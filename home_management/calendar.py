@@ -9,6 +9,7 @@ from .db import (
     color,
     fetch_one,
     get_db,
+    hid,
     log,
     member_ref,
     now_iso,
@@ -118,11 +119,15 @@ def occurrences(event, range_start, range_end):
             yield occ_start, occ_end
 
 
-def events_between(range_start, range_end):
+def event_row(event_id):
+    return fetch_one("SELECT * FROM events WHERE id = ? AND household_id = ?", (event_id, hid()))
+
+
+def events_between(household_id, range_start, range_end):
     candidates = rows(
-        "SELECT * FROM events WHERE start < ? AND (recurrence != 'none' OR end >= ?) "
+        "SELECT * FROM events WHERE household_id = ? AND start < ? AND (recurrence != 'none' OR end >= ?) "
         "AND (recurrence_until IS NULL OR recurrence_until >= ?)",
-        (fmt(range_end), fmt(range_start), range_start.date().isoformat()),
+        (household_id, fmt(range_end), fmt(range_start), range_start.date().isoformat()),
     )
     result = []
     for row in candidates:
@@ -141,17 +146,17 @@ def list_events():
         abort(400, "Période invalide.")
     range_start = datetime.combine(start, datetime.min.time())
     range_end = datetime.combine(end + timedelta(days=1), datetime.min.time())
-    return jsonify(events_between(range_start, range_end))
+    return jsonify(events_between(hid(), range_start, range_end))
 
 
 @bp.get("/<int:event_id>")
 def get_event(event_id):
-    return jsonify(serialize(fetch_one("SELECT * FROM events WHERE id = ?", (event_id,))))
+    return jsonify(serialize(event_row(event_id)))
 
 
 @bp.post("")
 def create_event():
-    fields = clean(payload())
+    fields = {"household_id": hid(), **clean(payload())}
     now = now_iso()
     conn = get_db()
     cols = ", ".join(fields)
@@ -161,12 +166,12 @@ def create_event():
     )
     log("calendar", "create", f"Événement ajouté : {fields['title']} ({describe(fields)})", cur.lastrowid, fields)
     conn.commit()
-    return jsonify(serialize(fetch_one("SELECT * FROM events WHERE id = ?", (cur.lastrowid,)))), 201
+    return jsonify(serialize(event_row(cur.lastrowid))), 201
 
 
 @bp.put("/<int:event_id>")
 def update_event(event_id):
-    before = fetch_one("SELECT * FROM events WHERE id = ?", (event_id,))
+    before = event_row(event_id)
     fields = clean(payload())
     conn = get_db()
     assignments = ", ".join(f"{k} = ?" for k in fields)
@@ -176,12 +181,12 @@ def update_event(event_id):
     log("calendar", "update", f"Événement modifié : {fields['title']} ({describe(fields)})", event_id,
         {"before": before, "after": fields})
     conn.commit()
-    return jsonify(serialize(fetch_one("SELECT * FROM events WHERE id = ?", (event_id,))))
+    return jsonify(serialize(event_row(event_id)))
 
 
 @bp.delete("/<int:event_id>")
 def delete_event(event_id):
-    event = serialize(fetch_one("SELECT * FROM events WHERE id = ?", (event_id,)))
+    event = serialize(event_row(event_id))
     occurrence = request.args.get("occurrence")
     conn = get_db()
     if occurrence and event["recurrence"] != "none":

@@ -8,14 +8,14 @@ from werkzeug.middleware.proxy_fix import ProxyFix
 
 from . import db
 
-__version__ = "1.1.0"
+__version__ = "1.2.0"
 
 
 def create_app(test_config=None):
     app = Flask(__name__, instance_relative_config=True, static_folder="static", static_url_path="/static")
     app.config.from_mapping(
         SECRET_KEY=os.environ.get("HM_SECRET_KEY", "dev-change-me"),
-        # Mot de passe partagé du foyer. Vide = pas d'authentification (usage local uniquement).
+        # Mot de passe initial du premier foyer (identifiant « maison »), modifiable ensuite dans l'app.
         APP_PASSWORD=os.environ.get("HM_PASSWORD", ""),
         # Jeton secret du flux iCal (abonnement depuis le calendrier de l'iPhone).
         ICS_TOKEN=os.environ.get("HM_ICS_TOKEN", ""),

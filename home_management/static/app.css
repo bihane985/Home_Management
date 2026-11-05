@@ -212,6 +212,12 @@ h1, h2, h3 { margin: 0; line-height: 1.2; }
 .hero-time { font-size: clamp(3.6rem, 14vw, 7rem); font-weight: 750; letter-spacing: -.04em; line-height: .95; font-variant-numeric: tabular-nums; }
 .hero-date { font-size: clamp(1.05rem, 2.6vw, 1.45rem); font-weight: 550; opacity: .92; margin-top: 6px; }
 .hero-side { display: flex; flex-direction: column; gap: 10px; align-items: flex-start; }
+.hero-wx {
+  display: inline-flex; align-items: baseline; gap: 6px; margin-left: 6px; padding: 3px 10px; border-radius: 10px;
+  background: rgba(255, 255, 255, .16); font-size: .95rem; font-weight: 650; white-space: nowrap;
+}
+.hero-wx small { font-size: .78rem; font-weight: 550; opacity: .85; }
+details summary { cursor: pointer; font-weight: 600; color: var(--accent); padding: 6px 0; }
 .hero-hello { margin: 0; font-size: 1.15rem; font-weight: 650; }
 .hero-stats { display: flex; flex-wrap: wrap; gap: 8px; }
 .hero-stats .stat {

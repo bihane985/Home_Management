@@ -57,7 +57,9 @@
     me: store.get('me', ''),
     members: [],
     rev: -1,
-    authRequired: false,
+    household: null,
+    adminHouseholds: [],
+    weather: null,
     cal: { month: firstOfMonth(now), selected: ymd(now), events: [] },
     chores: { list: [], today: ymd(now), filter: store.get('choresFilter', 'all'), showDone: false, stats: [] },
     shop: { lists: [], categories: [], current: store.get('list', null), items: Object.assign([], { loading: true }), frequent: [], draft: '', draftQty: '' },
@@ -234,6 +236,76 @@
     .map((m) => `<option value="${m.id}" ${m.id === selected ? 'selected' : ''}>${esc(m.name)}</option>`).join('');
 
   // ====================================================================
+  // Météo (Open-Meteo, appelé directement par le navigateur, sans clé)
+  // ====================================================================
+  // Codes météo WMO -> [emoji jour, libellé, emoji nuit]
+  const WMO = {
+    0: ['☀️', 'Ensoleillé', '🌙'], 1: ['🌤️', 'Plutôt ensoleillé', '🌙'], 2: ['⛅', 'Partiellement nuageux', '☁️'], 3: ['☁️', 'Couvert'],
+    45: ['🌫️', 'Brouillard'], 48: ['🌫️', 'Brouillard givrant'],
+    51: ['🌦️', 'Bruine légère', '🌧️'], 53: ['🌦️', 'Bruine', '🌧️'], 55: ['🌧️', 'Bruine forte'], 56: ['🌧️', 'Bruine verglaçante'], 57: ['🌧️', 'Bruine verglaçante'],
+    61: ['🌦️', 'Pluie faible', '🌧️'], 63: ['🌧️', 'Pluie'], 65: ['🌧️', 'Forte pluie'], 66: ['🌧️', 'Pluie verglaçante'], 67: ['🌧️', 'Pluie verglaçante'],
+    71: ['🌨️', 'Neige faible'], 73: ['🌨️', 'Neige'], 75: ['❄️', 'Forte neige'], 77: ['🌨️', 'Grains de neige'],
+    80: ['🌦️', 'Averses', '🌧️'], 81: ['🌧️', 'Averses'], 82: ['⛈️', 'Fortes averses'], 85: ['🌨️', 'Averses de neige'], 86: ['🌨️', 'Averses de neige'],
+    95: ['⛈️', 'Orage'], 96: ['⛈️', 'Orage avec grêle'], 99: ['⛈️', 'Orage avec grêle'],
+  };
+  const wx = (code, isDay = 1) => {
+    const [day, label, night] = WMO[code] || ['🌡️', '—'];
+    return { emoji: isDay ? day : night || day, label };
+  };
+
+  /** Position de l'appareil (arrondie à ~1 km), mémorisée pour les fois où la localisation ne répond pas. */
+  function devicePosition() {
+    return new Promise((resolve) => {
+      if (!('geolocation' in navigator)) return resolve(store.get('geo', null));
+      navigator.geolocation.getCurrentPosition(
+        (p) => {
+          const pos = { lat: Number(p.coords.latitude.toFixed(2)), lon: Number(p.coords.longitude.toFixed(2)) };
+          store.set('geo', pos);
+          resolve(pos);
+        },
+        () => resolve(store.get('geo', null)),
+        { maximumAge: 3 * 3600e3, timeout: 10000 },
+      );
+    });
+  }
+
+  /** Lieu de la météo : position de l'appareil, sinon la ville de secours choisie dans les réglages. */
+  async function weatherLocation() {
+    const pos = await devicePosition();
+    if (pos) return pos;
+    const h = state.household;
+    return h?.latitude != null ? { lat: h.latitude, lon: h.longitude } : null;
+  }
+
+  async function loadWeather(force = false) {
+    const loc = await weatherLocation();
+    if (!loc) { state.weather = null; return; }
+    const key = `${loc.lat},${loc.lon}`;
+    const cached = store.get('weather', null);
+    const fresh = cached && cached.key === key;
+    if (!force && fresh && Date.now() - cached.at < 15 * 60000) { state.weather = cached.data; return; }
+    const url = `https://api.open-meteo.com/v1/forecast?latitude=${loc.lat}&longitude=${loc.lon}`
+      + '&current=temperature_2m,weather_code,is_day&daily=temperature_2m_max,temperature_2m_min&timezone=auto&forecast_days=1';
+    try {
+      const res = await fetch(url);
+      if (!res.ok) throw new Error(res.status);
+      state.weather = await res.json();
+      store.set('weather', { key, at: Date.now(), data: state.weather });
+    } catch {
+      state.weather = fresh ? cached.data : null; // hors ligne : dernière météo connue
+    }
+  }
+
+  /** Météo compacte affichée à côté du « Bonjour ». */
+  function weatherChip() {
+    const w = state.weather;
+    if (!w?.current) return '';
+    const { emoji, label } = wx(w.current.weather_code, w.current.is_day);
+    return `<span class="hero-wx" title="${esc(label)}">${emoji} ${Math.round(w.current.temperature_2m)}°
+      <small>↑${Math.round(w.daily.temperature_2m_max[0])}° ↓${Math.round(w.daily.temperature_2m_min[0])}°</small></span>`;
+  }
+
+  // ====================================================================
   // Accueil (tableau de bord)
   // ====================================================================
   const capitalize = (s) => s.charAt(0).toUpperCase() + s.slice(1);
@@ -342,7 +414,7 @@
           <div class="hero-date" id="home-date">${capitalize(fmtHeroDate.format(n))}</div>
         </div>
         <div class="hero-side">
-          <p class="hero-hello">${esc(greeting())} 👋</p>
+          <p class="hero-hello">${esc(greeting())} 👋 ${weatherChip()}</p>
           <div class="hero-stats">
             ${stat('calendar', '📅', todayCount, `événement${todayCount > 1 ? 's' : ''} aujourd'hui`)}
             ${stat('chores', '🧹', dueChores.length, `tâche${dueChores.length > 1 ? 's' : ''} à faire`)}
@@ -905,7 +977,11 @@
   // ====================================================================
   async function openSettings() {
     let settings = {};
-    try { settings = await api('GET', '/api/settings'); } catch { /* affiché sans le lien iCal */ }
+    try {
+      settings = await api('GET', '/api/settings');
+      state.household = settings.household;
+    } catch { /* affiché avec les informations déjà connues */ }
+    const h = state.household || {};
     const notif = 'Notification' in window ? Notification.permission : 'unsupported';
     const notifText = { granted: '✅ Activées sur cet appareil', denied: '⛔ Refusées — à réactiver dans les réglages du téléphone', default: 'Non activées', unsupported: "Non disponibles : sur iPhone, ajoutez d'abord l'app à l'écran d'accueil." }[notif];
     openSheet({
@@ -928,6 +1004,36 @@
           </form>
         </section>
         <section class="settings-block">
+          <h3>🏡 Foyer</h3>
+          <form id="household-form" style="display:flex;gap:8px" autocomplete="off">
+            <input class="input" name="name" value="${esc(h.name)}" required maxlength="60" style="flex:1;min-width:0" aria-label="Nom du foyer">
+            <button class="btn">Renommer</button>
+          </form>
+          <p class="muted small">Identifiant de connexion : <b>${esc(h.login)}</b></p>
+          <details>
+            <summary>Changer le mot de passe</summary>
+            <form id="password-form" autocomplete="off" style="margin-top:10px">
+              <label class="field"><span>Mot de passe actuel</span><input type="password" name="current" required autocomplete="current-password"></label>
+              <label class="field"><span>Nouveau mot de passe (6 caractères min.)</span><input type="password" name="new" required minlength="6" autocomplete="new-password"></label>
+              <label class="field"><span>Confirmer</span><input type="password" name="confirm" required minlength="6" autocomplete="new-password"></label>
+              <label class="switch">Déconnecter les autres appareils <input type="checkbox" name="logout_others" checked></label>
+              <button class="btn primary block">Changer le mot de passe</button>
+            </form>
+          </details>
+          <button class="btn block" style="margin-top:10px" data-action="logout-others">Déconnecter tous les autres appareils</button>
+        </section>
+        <section class="settings-block">
+          <h3>🌤️ Météo</h3>
+          <p class="small">Lieu : <b>${store.get('geo', null) ? "position de l'appareil" : h.city ? esc(h.city) : 'non défini'}</b></p>
+          <p class="muted small">La météo utilise la localisation de l'appareil. Si elle est refusée, la ville ci-dessous sert de secours.</p>
+          <form id="city-form" style="display:flex;gap:8px" autocomplete="off">
+            <input class="input" name="q" placeholder="Ville de secours…" required style="flex:1;min-width:0" enterkeyhint="search">
+            <button class="btn">Chercher</button>
+          </form>
+          <div id="city-results" class="opt-group" style="margin-top:8px"></div>
+          ${'geolocation' in navigator ? '<button class="btn ghost" style="margin-top:4px" data-action="geo-locate">📍 Réessayer la localisation</button>' : ''}
+        </section>
+        <section class="settings-block">
           <h3>${icon('bell', 'sm')} Alertes</h3>
           <p class="small">Notifications : ${notifText}</p>
           ${notif === 'default' ? '<button class="btn" data-action="ask-notifications">Activer les notifications</button>' : ''}
@@ -936,7 +1042,10 @@
         ${settings.ics_url ? `<section class="settings-block">
           <h3>📲 Abonnement calendrier (iPhone)</h3>
           <div class="code" id="ics-url">${esc(settings.ics_url)}</div>
-          <div class="form-actions" style="margin-top:8px"><button class="btn" data-action="copy-ics">Copier le lien</button></div>
+          <div class="form-actions" style="margin-top:8px">
+            <button class="btn" data-action="copy-text" data-target="#ics-url">Copier le lien</button>
+            <button class="btn ghost" data-action="regen-ics">Générer un nouveau lien</button>
+          </div>
           <p class="muted small">Sur l'iPhone : Réglages › Apps › Calendrier › Comptes de calendrier › Ajouter un compte › Autre › <b>Ajouter un calendrier avec abonnement</b>, collez le lien, puis désactivez « Supprimer les alertes ». Gardez ce lien privé.</p>
         </section>` : ''}
         <section class="settings-block">
@@ -944,8 +1053,13 @@
           <label class="switch">Garder l'écran allumé <input type="checkbox" id="wake-toggle" ${store.get('wake', false) ? 'checked' : ''} ${'wakeLock' in navigator ? '' : 'disabled'}></label>
           <label class="switch">Revenir à l'accueil après 2 min d'inactivité <input type="checkbox" id="autohome-toggle" ${store.get('autoHome', false) ? 'checked' : ''}></label>
         </section>
+        ${h.is_admin ? `<section class="settings-block">
+          <h3>🛡️ Administration</h3>
+          <p class="muted small">Créez un foyer pour une autre famille : elle aura son identifiant, son mot de passe et ses propres données.</p>
+          <button class="btn block" data-action="open-admin">Gérer les foyers</button>
+        </section>` : ''}
         <section class="settings-block">
-          ${state.authRequired ? `<button class="btn danger block" data-action="logout">Se déconnecter</button>` : ''}
+          <button class="btn danger block" data-action="logout">Se déconnecter</button>
           <p class="muted small" style="text-align:center">Home_Management ${esc(settings.version || '')} · fuseau ${esc(settings.timezone || '')}</p>
         </section>
       </div>`,
@@ -961,9 +1075,130 @@
           await mutate(() => api('POST', '/api/members', { name: f.name.value, color: f.color.value }));
           openSettings();
         });
+        $('#household-form', root).addEventListener('submit', async (e) => {
+          e.preventDefault();
+          const res = await mutate(() => api('PUT', '/api/household', { name: e.target.elements.name.value }));
+          state.household = res.household;
+          renderBrand();
+          toast('Foyer renommé');
+        });
+        $('#password-form', root).addEventListener('submit', async (e) => {
+          e.preventDefault();
+          const f = e.target.elements;
+          if (f.new.value !== f.confirm.value) return toast('Les deux mots de passe ne correspondent pas.', { error: true });
+          await mutate(() => api('POST', '/api/household/password', { current: f.current.value, new: f.new.value, logout_others: f.logout_others.checked }));
+          e.target.reset();
+          e.target.closest('details').open = false;
+          toast('Mot de passe modifié');
+        });
+        $('#city-form', root).addEventListener('submit', (e) => { e.preventDefault(); searchCity(e.target.elements.q.value, root); });
         $('#wake-toggle', root).addEventListener('change', (e) => { store.set('wake', e.target.checked); applyWakeLock(); });
         $('#autohome-toggle', root).addEventListener('change', (e) => store.set('autoHome', e.target.checked));
       },
+    });
+  }
+
+  async function searchCity(query, root) {
+    const box = $('#city-results', root);
+    box.innerHTML = '<span class="muted small">Recherche…</span>';
+    try {
+      const res = await fetch(`https://geocoding-api.open-meteo.com/v1/search?name=${encodeURIComponent(query)}&count=6&language=fr&format=json`);
+      const data = await res.json();
+      const results = data.results || [];
+      box.innerHTML = results.length ? results.map((r) => {
+        const label = [r.name, r.admin1, r.country].filter(Boolean).join(', ');
+        return `<button class="chip" data-action="pick-city" data-label="${esc(label)}" data-lat="${r.latitude}" data-lon="${r.longitude}">📍 ${esc(label)}</button>`;
+      }).join('') : '<span class="muted small">Aucune ville trouvée.</span>';
+    } catch {
+      box.innerHTML = '<span class="muted small">Recherche impossible (connexion ?).</span>';
+    }
+  }
+
+  async function saveLocation(city, latitude, longitude) {
+    const res = await mutate(() => api('PUT', '/api/household', { city, latitude, longitude }));
+    state.household = res.household;
+    toast(`Météo : ${city}`);
+    await loadWeather(true);
+    render();
+    openSettings();
+  }
+
+  // --- Administration des foyers ---------------------------------------
+  async function openAdmin() {
+    let households;
+    try { households = await api('GET', '/api/admin/households'); } catch (err) { toast(err.message, { error: true }); return; }
+    state.adminHouseholds = households;
+    const today = ymd(new Date());
+    openSheet({
+      title: 'Foyers',
+      body: `<div>
+        <p class="muted small" style="margin-top:0">Chaque foyer a son identifiant et son mot de passe, et ne voit que ses propres données.</p>
+        <ul class="list card">${households.map((x) => `<li class="row">
+          <button class="row-main" data-action="edit-household" data-id="${x.id}">
+            <div class="row-title">${esc(x.name)} ${x.is_admin ? '<span class="tag">administrateur</span>' : ''}</div>
+            <div class="row-meta">identifiant <b>${esc(x.login)}</b> · ${x.members} membre(s) · ${x.last_activity ? `actif ${relDay(x.last_activity, today)}` : 'pas encore utilisé'}</div>
+          </button>${icon('right', 'sm')}</li>`).join('')}</ul>
+        <div class="form-actions"><button class="btn" data-action="open-settings">${icon('left', 'sm')} Réglages</button><button class="btn primary" data-action="new-household">${icon('plus', 'sm')} Nouveau foyer</button></div>
+      </div>`,
+    });
+  }
+
+  function openHouseholdForm(x) {
+    const isNew = !x;
+    const self = !isNew && x.id === state.household?.id;
+    x = x || { name: '', login: '' };
+    openSheet({
+      title: isNew ? 'Nouveau foyer' : `Foyer « ${x.name} »`,
+      body: `<form id="sheet-form" autocomplete="off">
+        <label class="field"><span>Nom du foyer</span><input name="name" required maxlength="60" value="${esc(x.name)}" placeholder="Chez Julie"></label>
+        <label class="field"><span>Identifiant de connexion (lettres, chiffres, . - _)</span><input name="login" required minlength="3" maxlength="40" value="${esc(x.login)}" placeholder="julie" autocapitalize="none" autocorrect="off" spellcheck="false"></label>
+        <label class="field"><span>${isNew ? 'Mot de passe (6 caractères min.)' : 'Nouveau mot de passe (laisser vide pour ne pas changer)'}</span>
+          <input name="password" type="text" ${isNew ? 'required' : ''} minlength="6" autocomplete="off" autocapitalize="none" spellcheck="false"></label>
+        ${!isNew && !self ? '<p class="muted small">Changer le mot de passe déconnecte tous les appareils de ce foyer.</p>' : ''}
+        <div class="form-actions">
+          <button type="button" class="btn" data-action="open-admin">${icon('left', 'sm')} Retour</button>
+          ${!isNew && !self ? `<button type="button" class="btn danger" data-del>${icon('trash', 'sm')} Supprimer</button>` : ''}
+          <button class="btn primary">${isNew ? 'Créer le foyer' : 'Enregistrer'}</button>
+        </div>
+      </form>`,
+      onMount(form) {
+        $('[data-del]', form)?.addEventListener('click', async () => {
+          if (!confirm(`Supprimer définitivement le foyer « ${x.name} » et TOUTES ses données (calendrier, tâches, courses, historique) ?`)) return;
+          if (prompt(`Pour confirmer, tapez l'identifiant du foyer : ${x.login}`)?.trim().toLowerCase() !== x.login) return toast('Suppression annulée');
+          await mutate(() => api('DELETE', `/api/admin/households/${x.id}`));
+          toast('Foyer supprimé');
+          await openAdmin();
+        });
+      },
+      async onSubmit(form) {
+        const f = form.elements;
+        const body = { name: f.name.value, login: f.login.value.trim().toLowerCase(), password: f.password.value };
+        if (isNew) {
+          await mutate(() => api('POST', '/api/admin/households', body));
+          showCredentials(body);
+        } else {
+          await mutate(() => api('PUT', `/api/admin/households/${x.id}`, body));
+          if (self) { state.household = { ...state.household, name: body.name, login: body.login }; renderBrand(); }
+          toast('Foyer enregistré');
+          await openAdmin();
+        }
+      },
+    });
+  }
+
+  function showCredentials({ name, login, password }) {
+    const text = `Application Maison pour « ${name} »\nAdresse : ${location.origin}\nIdentifiant : ${login}\nMot de passe : ${password}`;
+    openSheet({
+      title: 'Foyer créé 🎉',
+      body: `<div>
+        <p style="margin-top:0">Transmettez ces informations à la personne concernée. Elle pourra changer son mot de passe dans ses Réglages.</p>
+        <div class="code" id="credentials" style="white-space:pre-wrap">${esc(text)}</div>
+        <div class="form-actions">
+          <button class="btn" data-action="copy-text" data-target="#credentials">Copier</button>
+          ${navigator.share ? '<button class="btn" data-action="share-text" data-target="#credentials">Partager…</button>' : ''}
+          <button class="btn primary" data-action="open-admin">Terminé</button>
+        </div>
+      </div>`,
     });
   }
 
@@ -997,9 +1232,10 @@
     const button = $('button.primary', form);
     $('.form-error', form)?.remove();
     button.disabled = true;
+    const current = sheet;
     try {
       await sheet.onSubmit(form);
-      closeSheet();
+      if (sheet === current) closeSheet(); // sauf si onSubmit a ouvert une autre feuille
     } catch (err) {
       form.insertAdjacentHTML('afterbegin', `<div class="form-error">${esc(err.message)}</div>`);
       form.closest('.sheet-body').scrollTop = 0;
@@ -1116,9 +1352,32 @@
       openSettings();
     },
     'ask-notifications': async () => { await Notification.requestPermission(); openSettings(); },
-    'copy-ics': async () => {
-      try { await navigator.clipboard.writeText($('#ics-url').textContent); toast('Lien copié'); } catch { toast('Sélectionnez le lien pour le copier'); }
+    'copy-text': async (el) => {
+      try { await navigator.clipboard.writeText($(el.dataset.target).textContent); toast('Copié'); } catch { toast('Sélectionnez le texte pour le copier'); }
     },
+    'share-text': (el) => navigator.share({ text: $(el.dataset.target).textContent }).catch(() => {}),
+    'regen-ics': async () => {
+      if (!confirm("Générer un nouveau lien ? L'ancien cessera de fonctionner : il faudra réabonner les iPhone.")) return;
+      await mutate(() => api('POST', '/api/household/ics-token'));
+      openSettings();
+    },
+    'logout-others': async () => {
+      if (!confirm('Déconnecter tous les autres appareils du foyer ? Ils devront ressaisir le mot de passe.')) return;
+      await mutate(() => api('POST', '/api/household/logout-others'));
+      toast('Autres appareils déconnectés');
+    },
+    'pick-city': (el) => saveLocation(el.dataset.label, Number(el.dataset.lat), Number(el.dataset.lon)),
+    'geo-locate': async () => {
+      try { localStorage.removeItem('hm.geo'); } catch { /* ignore */ }
+      await loadWeather(true);
+      if (!store.get('geo', null)) return toast('Localisation refusée : autorisez-la dans les réglages du téléphone, ou choisissez une ville de secours.', { error: true });
+      toast("Position de l'appareil utilisée");
+      render();
+      openSettings();
+    },
+    'open-admin': () => openAdmin(),
+    'new-household': () => openHouseholdForm(),
+    'edit-household': (el) => openHouseholdForm(state.adminHouseholds.find((x) => x.id === Number(el.dataset.id))),
     logout: async () => { await api('POST', '/api/logout'); location.reload(); },
   };
 
@@ -1284,6 +1543,25 @@
     if (store.get('autoHome', false) && state.view !== 'home' && !sheet && $('#alert-root').hidden && Date.now() - lastActivity > 120000) go('home');
   }
 
+  function renderBrand() {
+    const name = state.household?.name || 'Maison';
+    $('.nav-brand span').textContent = name;
+  }
+
+  /** Change de foyer sur cet appareil : on oublie les préférences liées à l'ancien. */
+  function setHousehold(h) {
+    const previous = store.get('login', null); // null : appareil installé avant la gestion des foyers
+    if (previous && previous !== h.login) {
+      ['me', 'list', 'fired', 'weather', 'choresFilter'].forEach((k) => { try { localStorage.removeItem('hm.' + k); } catch { /* ignore */ } });
+      state.me = '';
+      state.shop.current = null;
+      state.chores.filter = 'all';
+    }
+    store.set('login', h.login);
+    state.household = h;
+    renderBrand();
+  }
+
   function showLogin() {
     if ($('#login')) return;
     const el = document.createElement('div');
@@ -1295,7 +1573,8 @@
       <h1>Maison</h1>
       <p class="muted">Calendrier, tâches et courses du foyer</p>
       <form autocomplete="on">
-        <label class="field"><span>Mot de passe du foyer</span><input type="password" name="password" autocomplete="current-password" required></label>
+        <label class="field"><span>Identifiant du foyer</span><input name="login" autocomplete="username" autocapitalize="none" autocorrect="off" spellcheck="false" required value="${esc(store.get('login', ''))}"></label>
+        <label class="field"><span>Mot de passe</span><input type="password" name="password" autocomplete="current-password" required></label>
         <button class="btn primary block">Entrer</button>
       </form>
     </div>`;
@@ -1304,15 +1583,20 @@
     form.addEventListener('submit', async (e) => {
       e.preventDefault();
       $('.form-error', form)?.remove();
+      const button = $('button', form);
+      button.disabled = true;
       try {
-        await api('POST', '/api/login', { password: form.elements.password.value });
+        const res = await api('POST', '/api/login', { login: form.elements.login.value.trim().toLowerCase(), password: form.elements.password.value });
+        setHousehold(res.household);
         el.remove();
         start();
       } catch (err) {
         form.insertAdjacentHTML('afterbegin', `<div class="form-error">${esc(err.message)}</div>`);
+      } finally {
+        button.disabled = false;
       }
     });
-    $('input', form).focus();
+    $(form.elements.login.value ? 'input[name=password]' : 'input', form).focus();
   }
 
   // ====================================================================
@@ -1320,14 +1604,17 @@
   // ====================================================================
   let started = false;
   async function start() {
+    state.rev = -1;
     render();
     await sync(true);
+    loadWeather().then(() => state.view === 'home' && render());
     if (started) return;
     started = true;
     checkAlerts();
     setInterval(() => document.visibilityState === 'visible' && sync(), 15000);
     setInterval(checkAlerts, 30000);
     setInterval(tickClock, 1000);
+    setInterval(() => loadWeather().then(() => state.view === 'home' && render()), 15 * 60000);
   }
 
   async function boot() {
@@ -1343,9 +1630,10 @@
     applyWakeLock();
     try {
       const status = await api('GET', '/api/status');
-      state.authRequired = status.auth_required;
       if (!status.authenticated) return showLogin();
+      setHousehold(status.household);
     } catch (err) {
+      if ($('#login')) return;
       $('#main').innerHTML = `<div class="card empty"><span class="big">📡</span>${esc(err.message)}<br><button class="btn" style="margin-top:12px" onclick="location.reload()">Réessayer</button></div>`;
       return;
     }

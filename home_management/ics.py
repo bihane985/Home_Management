@@ -1,12 +1,10 @@
 """Flux iCalendar : abonnement depuis l'app Calendrier de l'iPhone (alertes natives)."""
-import hmac
 from datetime import datetime, timedelta
 
 from flask import Blueprint, Response, abort, request
 
-from . import core
 from .calendar import FMT, serialize
-from .db import now_iso, rows
+from .db import get_db, now_iso, rows
 
 bp = Blueprint("ics", __name__)
 
@@ -79,7 +77,8 @@ def build_event(event, stamp):
 @bp.get("/calendar.ics")
 def feed():
     token = request.args.get("token", "")
-    if not hmac.compare_digest(token.encode(), core.ics_token().encode()):
+    household = get_db().execute("SELECT id, name FROM households WHERE ics_token = ?", (token,)).fetchone()
+    if not token or household is None:
         abort(403)
     stamp = datetime.fromisoformat(now_iso()).strftime("%Y%m%dT%H%M%S")
     lines = [
@@ -87,11 +86,11 @@ def feed():
         "VERSION:2.0",
         "PRODID:-//Home_Management//FR",
         "CALSCALE:GREGORIAN",
-        "X-WR-CALNAME:Maison",
+        f"X-WR-CALNAME:{escape(household['name'])}",
         "X-PUBLISHED-TTL:PT15M",
         "REFRESH-INTERVAL;VALUE=DURATION:PT15M",
     ]
-    for row in rows("SELECT * FROM events ORDER BY start"):
+    for row in rows("SELECT * FROM events WHERE household_id = ? ORDER BY start", (household["id"],)):
         lines += build_event(serialize(row), stamp)
     lines.append("END:VCALENDAR")
     body = "\r\n".join(fold(line) for line in lines) + "\r\n"

@@ -8,6 +8,7 @@ from .db import (
     add_months,
     fetch_one,
     get_db,
+    hid,
     log,
     member_ref,
     now_iso,
@@ -21,6 +22,10 @@ from .db import (
 bp = Blueprint("chores", __name__, url_prefix="/api/chores")
 
 UNITS = {"none", "day", "week", "month"}
+
+
+def chore_row(chore_id):
+    return fetch_one("SELECT * FROM chores WHERE id = ? AND household_id = ?", (chore_id, hid()))
 
 
 def serialize(row):
@@ -66,16 +71,19 @@ def next_due(chore, done_on):
 @bp.get("")
 def list_chores():
     chores = rows(
-        "SELECT * FROM chores WHERE active = 1 ORDER BY due_date IS NULL, due_date, title COLLATE NOCASE"
+        "SELECT * FROM chores WHERE household_id = ? AND active = 1 "
+        "ORDER BY due_date IS NULL, due_date, title COLLATE NOCASE",
+        (hid(),),
     )
     if request.args.get("include_done"):
-        chores += rows("SELECT * FROM chores WHERE active = 0 ORDER BY last_done_at DESC LIMIT 50")
+        chores += rows("SELECT * FROM chores WHERE household_id = ? AND active = 0 ORDER BY last_done_at DESC LIMIT 50",
+                       (hid(),))
     return jsonify(today=today().isoformat(), chores=[serialize(c) for c in chores])
 
 
 @bp.post("")
 def create_chore():
-    fields = clean(payload())
+    fields = {"household_id": hid(), **clean(payload())}
     now = now_iso()
     conn = get_db()
     cur = conn.execute(
@@ -85,12 +93,12 @@ def create_chore():
     )
     log("chores", "create", f"Tâche ajoutée : {fields['title']}", cur.lastrowid, fields)
     conn.commit()
-    return jsonify(serialize(fetch_one("SELECT * FROM chores WHERE id = ?", (cur.lastrowid,)))), 201
+    return jsonify(serialize(chore_row(cur.lastrowid))), 201
 
 
 @bp.put("/<int:chore_id>")
 def update_chore(chore_id):
-    before = fetch_one("SELECT * FROM chores WHERE id = ?", (chore_id,))
+    before = chore_row(chore_id)
     fields = clean(payload())
     conn = get_db()
     conn.execute(
@@ -99,12 +107,12 @@ def update_chore(chore_id):
     )
     log("chores", "update", f"Tâche modifiée : {fields['title']}", chore_id, {"before": before, "after": fields})
     conn.commit()
-    return jsonify(serialize(fetch_one("SELECT * FROM chores WHERE id = ?", (chore_id,))))
+    return jsonify(serialize(chore_row(chore_id)))
 
 
 @bp.delete("/<int:chore_id>")
 def delete_chore(chore_id):
-    chore = fetch_one("SELECT * FROM chores WHERE id = ?", (chore_id,))
+    chore = chore_row(chore_id)
     conn = get_db()
     conn.execute("DELETE FROM chores WHERE id = ?", (chore_id,))
     log("chores", "delete", f"Tâche supprimée : {chore['title']}", chore_id, chore)
@@ -114,7 +122,7 @@ def delete_chore(chore_id):
 
 @bp.post("/<int:chore_id>/complete")
 def complete_chore(chore_id):
-    chore = fetch_one("SELECT * FROM chores WHERE id = ?", (chore_id,))
+    chore = chore_row(chore_id)
     if not chore["active"]:
         abort(409, "Cette tâche est déjà terminée.")
     who, now, done_on = actor(), now_iso(), today()
@@ -139,12 +147,12 @@ def complete_chore(chore_id):
         summary = f"Tâche faite : {chore['title']} (prochaine fois le {due[8:10]}/{due[5:7]})"
     log("chores", "complete", summary, chore_id)
     conn.commit()
-    return jsonify(serialize(fetch_one("SELECT * FROM chores WHERE id = ?", (chore_id,))))
+    return jsonify(serialize(chore_row(chore_id)))
 
 
 @bp.post("/<int:chore_id>/undo")
 def undo_completion(chore_id):
-    chore = fetch_one("SELECT * FROM chores WHERE id = ?", (chore_id,))
+    chore = chore_row(chore_id)
     last = get_db().execute(
         "SELECT * FROM chore_completions WHERE chore_id = ? ORDER BY id DESC LIMIT 1", (chore_id,)
     ).fetchone()
@@ -168,7 +176,7 @@ def undo_completion(chore_id):
     )
     log("chores", "undo", f"Réalisation annulée : {chore['title']}", chore_id)
     conn.commit()
-    return jsonify(serialize(fetch_one("SELECT * FROM chores WHERE id = ?", (chore_id,))))
+    return jsonify(serialize(chore_row(chore_id)))
 
 
 @bp.get("/stats")
@@ -176,8 +184,8 @@ def stats():
     days = min(max(request.args.get("days", 30, type=int), 1), 365)
     since = (today() - timedelta(days=days - 1)).isoformat()
     per_person = rows(
-        "SELECT done_by, COUNT(*) AS count FROM chore_completions WHERE done_at >= ? "
-        "GROUP BY done_by ORDER BY count DESC",
-        (since,),
+        "SELECT cc.done_by, COUNT(*) AS count FROM chore_completions cc JOIN chores c ON c.id = cc.chore_id "
+        "WHERE c.household_id = ? AND cc.done_at >= ? GROUP BY cc.done_by ORDER BY count DESC",
+        (hid(), since),
     )
     return jsonify(days=days, per_person=per_person)
